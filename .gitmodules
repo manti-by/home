@@ -1,0 +1,9 @@
+[submodule "odin"]
+	path = odin
+	url = git@github.com:manti-by/odin.git
+[submodule "coruscant"]
+	path = coruscant
+	url = git@github.com:manti-by/coruscant.git
+[submodule "centax"]
+	path = centax
+	url = git@github.com:manti-by/centax.git
