@@ -9,7 +9,7 @@ boundaries.
 | Path        | Submodule                                                 | Role                                                                 |
 | ----------- | --------------------------------------------------------- | -------------------------------------------------------------------- |
 | `odin/`     | `git@github.com:manti-by/odin.git`                        | Central Django 5.2 / DRF server, PostgreSQL, Redis, gunicorn + worker |
-| `coruscant/`| `git@github.com:manti-by/coruscant.git`                   | Raspberry Pi satellite: DS18B20 sensors, pumps/valves/servos, Kafka   |
+| `coruscant/`| `git@github.com:manti-by/coruscant.git`                   | Raspberry Pi satellite: DS18B20 sensors, pumps/valves/servos         |
 | `centax/`   | `git@github.com:manti-by/centax.git`                      | ESP-01S firmware: DHT22 temp/humidity, HTTP POST to ODIN             |
 
 Each submodule keeps its own `AGENTS.md` with service-specific rules. **Read the
@@ -66,35 +66,59 @@ the umbrella repo's gitlink for each.
   field or changing its type is a breaking change → bump `/api/v2/` and keep
   v1 alive until every producer has moved.
 
-### 2. Kafka topics
+### 2. Redis pub/sub channels
 
-- Bootstrap servers come from env, default `192.168.1.100:9092`.
-- **ODIN → Coruscant** (relay control), topic `KAFKA_CORUSCANT_TOPIC`:
+- Connection comes from `REDIS_URL`, default `redis://localhost:6379/0`.
+- **ODIN → Coruscant** (relay control), channel `REDIS_RELAYS_CHANNEL`
+  (default `relays:control`). ODIN sends the `RELAY_STATE_UPDATE` envelope,
+  where `data.state` is the desired relay state.
+- **Coruscant → ODIN** (telemetry), channel `REDIS_SENSORS_CHANNEL`
+  (default `sensors:telemetry`). Coruscant sends the `SENSOR_DATA_UPDATE`
+  envelope.
+- **Last known relay state** — Coruscant writes the `RELAY_STATE_UPDATE`
+  envelope to key `REDIS_RELAY_STATE_KEY_PREFIX<relay_id>` (default prefix
+  `relays:state:`) so ODIN can show the current value without replay.
 
-  ```json
-  { "relay_id": "<string>", "target_state": "<string>" }
-  ```
+Pub/sub is fire-and-forget: no retention, no replay, no consumer-group offset.
+A `RELAY_STATE_UPDATE` published while Coruscant is unsubscribed (restart,
+WiFi drop, redeploy) is dropped permanently; ODIN must re-issue it after
+Coruscant reconnects. ODIN detects the gap because `relays:state:<relay_id>`
+keeps the last value Coruscant applied, so the dashboard shows the previous
+state until the command is re-sent.
 
-- **Coruscant → ODIN** (telemetry), topic `KAFKA_ODIN_TOPIC` (default `odin`).
-  Envelope:
+All channels and the state key carry the same envelope:
 
-  ```json
-  { "type": "RELAY_STATE_UPDATE" | "SENSOR_DATA_UPDATE", "data": { ... } }
-  ```
+```json
+{
+  "type": "RELAY_STATE_UPDATE" | "SENSOR_DATA_UPDATE",
+  "data": { ... },
+  "timestamp": "<ISO-8601 UTC>"
+}
+```
 
-  `data` shape depends on `type`:
+`data` shape depends on `type`:
 
-  - `RELAY_STATE_UPDATE`: `{ "relay_id": "<string>", "state": "<string>" }`
-  - `SENSOR_DATA_UPDATE`: `{ "sensor_id": "<string>", "value": <float>, "unit": "<string>" }`
+- `RELAY_STATE_UPDATE`: `{ "relay_id": "<string>", "state": "<string>" }`
+- `SENSOR_DATA_UPDATE`: `{ "sensor_id": "<string>", "value": <float>, "unit": "<string>" }`
 
 ### 3. Shared enums (must match on both sides)
 
 Defined in two places and **must stay in lock-step**:
 
-| Concept       | ODIN (`odin/apps/core/kafka.py`)        | Coruscant (`coruscant/services/kafka.py`) |
-| ------------- | --------------------------------------- | ----------------------------------------- |
-| `MessageType` | `RELAY_STATE_UPDATE`, `SENSOR_DATA_UPDATE` | identical values                       |
-| `PartitionKey`| `sensors`, `relays`                     | identical values                          |
+| Concept       | ODIN (`odin/apps/core/redis_bus.py`)    | Coruscant (`coruscant/services/redis_bus.py`) |
+| ------------- | --------------------------------------- | --------------------------------------------- |
+| `MessageType` | `RELAY_STATE_UPDATE`, `SENSOR_DATA_UPDATE` | identical values                           |
+| `PartitionKey`| `sensors`, `relays`                     | identical values                              |
+
+`MessageType` and `PartitionKey` are not Kafka types. `MessageType` maps to the
+envelope's `type` field on the wire; `PartitionKey` is not a wire field — it
+selects the routing destination:
+
+- `relays` — channel `relays:control` and state keys `relays:state:<relay_id>`
+- `sensors` — channel `sensors:telemetry`
+
+Both sides must use the routing above (via the `REDIS_*` env vars), so the
+envelopes they produce and consume stay wire-compatible.
 
 Rule: never rename a value in one repo without renaming it in the other in the
 same release. Add new values additively; producers and consumers tolerate
@@ -102,16 +126,16 @@ unknown values.
 
 ### 4. Environment / configuration
 
-| Variable               | Used by        | Default (dev)                                    |
-| ---------------------- | -------------- | ------------------------------------------------ |
-| `API_URL`              | coruscant      | `http://192.168.1.100/api/v1`                    |
-| `SYNC_API_URL`         | coruscant      | `${API_URL}/sensors/logs/`                       |
-| `KAFKA_SERVERS`        | odin, coruscant| `192.168.1.100:9092`                             |
-| `KAFKA_TOPIC`          | coruscant      | `odin`                                           |
-| `KAFKA_ODIN_TOPIC`     | odin           | `odin`                                           |
-| `KAFKA_CORUSCANT_TOPIC`| odin           | `coruscant`                                      |
-| `LOGS_API_URL`         | coruscant      | `${API_URL}/core/logs/`                          |
-| `SERVER_ADDRESS`       | centax (firmware, hardcoded) | `http://192.168.1.100/api/v1/sensors/logs/` |
+| Variable                      | Used by          | Default (dev)                             |
+| ----------------------------- | ---------------- | ----------------------------------------- |
+| `API_URL`                     | coruscant        | `http://192.168.1.100/api/v1`             |
+| `SYNC_API_URL`                | coruscant        | `${API_URL}/sensors/logs/`                |
+| `REDIS_URL`                   | odin, coruscant  | `redis://localhost:6379/0`                |
+| `REDIS_RELAYS_CHANNEL`        | odin, coruscant  | `relays:control`                          |
+| `REDIS_SENSORS_CHANNEL`       | odin, coruscant  | `sensors:telemetry`                       |
+| `REDIS_RELAY_STATE_KEY_PREFIX`| odin, coruscant  | `relays:state:`                           |
+| `LOGS_API_URL`                | coruscant        | `${API_URL}/core/logs/`                   |
+| `SERVER_ADDRESS`              | centax (firmware, hardcoded) | `http://192.168.1.100/api/v1/sensors/logs/` |
 
 Keep defaults in sync. `centax` is a firmware build, so changing
 `SERVER_ADDRESS` requires a recompile and re-flash.
@@ -137,7 +161,7 @@ Keep defaults in sync. `centax` is a firmware build, so changing
 - No secrets in commits; configuration via env vars.
 - Loggers at module level (`logger = logging.getLogger(__name__)`), no
   `print` for diagnostics.
-- Tests with pytest; mock external services (Kafka, GPIO, HTTP).
+- Tests with pytest; mock external services (redis-py, GPIO, HTTP).
 
 ## Conventions Unique to a Submodule
 
@@ -145,8 +169,8 @@ Keep defaults in sync. `centax` is a firmware build, so changing
   `templates/`), URL-versioned API at `/api/v1/...`, RQ for background jobs,
   APScheduler for periodic jobs, pytest-django + Factory Boy for tests.
   See `odin/AGENTS.md`.
-- **coruscant** — hardware-facing Python: GPIO, DS18B20, Kafka producer,
-  local SQLite/PostgreSQL. Crontab-driven, deployed via `scp`. See
+- **coruscant** — hardware-facing Python: GPIO, DS18B20, local
+  SQLite/PostgreSQL. Crontab-driven, deployed via `scp`. See
   `coruscant/AGENTS.md`.
 - **centax** — Arduino sketch, no Python. Build with `arduino-cli` via the
   `Makefile`. No tests; verify by flashing a real ESP-01S. See `centax/README.md`
