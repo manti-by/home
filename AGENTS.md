@@ -6,11 +6,12 @@ boundaries.
 
 ## Layout
 
-| Path        | Submodule                                                 | Role                                                                 |
-| ----------- | --------------------------------------------------------- | -------------------------------------------------------------------- |
-| `odin/`     | `git@github.com:manti-by/odin.git`                        | Central Django 5.2 / DRF server, PostgreSQL, Redis, gunicorn + worker |
-| `coruscant/`| `git@github.com:manti-by/coruscant.git`                   | Raspberry Pi satellite: DS18B20 sensors, pumps/valves/servos         |
-| `centax/`   | `git@github.com:manti-by/centax.git`                      | ESP-01S firmware: DHT22 temp/humidity, HTTP POST to ODIN             |
+- **`odin/`** — `git@github.com:manti-by/odin.git` — Central Django 5.2 / DRF server,
+  PostgreSQL, Redis, gunicorn + worker.
+- **`coruscant/`** — `git@github.com:manti-by/coruscant.git` — Raspberry Pi satellite:
+  DS18B20 sensors, pumps/valves/servos, Redis pub/sub client.
+- **`centax/`** — `git@github.com:manti-by/centax.git` — ESP-01S firmware: DHT22
+  temp/humidity, HTTP POST to ODIN.
 
 Each submodule keeps its own `AGENTS.md` with service-specific rules. **Read the
 submodule's `AGENTS.md` first** whenever work is contained to one service; come
@@ -61,6 +62,7 @@ the umbrella repo's gitlink for each.
 
   - `sensor_id` must already exist in `odin` (foreign key to `Sensor`).
   - `temp` is °C, `humidity` is `%RH`. Omit a field the sensor cannot provide.
+
 - **Response:** 200 OK on success; 400 on validation; 404 on unknown `sensor_id`.
 - **Versioning rule:** additive fields are non-breaking. Removing/renaming a
   field or changing its type is a breaking change → bump `/api/v2/` and keep
@@ -68,57 +70,50 @@ the umbrella repo's gitlink for each.
 
 ### 2. Redis pub/sub channels
 
-- Connection comes from `REDIS_URL`, default `redis://localhost:6379/0`.
-- **ODIN → Coruscant** (relay control), channel `REDIS_RELAYS_CHANNEL`
-  (default `relays:control`). ODIN sends the `RELAY_STATE_UPDATE` envelope,
-  where `data.state` is the desired relay state.
-- **Coruscant → ODIN** (telemetry), channel `REDIS_SENSORS_CHANNEL`
-  (default `sensors:telemetry`). Coruscant sends the `SENSOR_DATA_UPDATE`
-  envelope.
-- **Last known relay state** — Coruscant writes the `RELAY_STATE_UPDATE`
-  envelope to key `REDIS_RELAY_STATE_KEY_PREFIX<relay_id>` (default prefix
-  `relays:state:`) so ODIN can show the current value without replay.
+- Connection comes from `REDIS_URL`, default `redis://localhost:6379/0`. Pub/sub delivery is
+  fire-and-forget with no replay; the last known relay state is persisted separately under
+  `relays:state:<relay_id>` so consumers can read it without a live subscription.
+- Every message on both channels is a JSON envelope:
 
-Pub/sub is fire-and-forget: no retention, no replay, no consumer-group offset.
-A `RELAY_STATE_UPDATE` published while Coruscant is unsubscribed (restart,
-WiFi drop, redeploy) is dropped permanently; ODIN must re-issue it after
-Coruscant reconnects. ODIN detects the gap because `relays:state:<relay_id>`
-keeps the last value Coruscant applied, so the dashboard shows the previous
-state until the command is re-sent.
+  ```json
+  { "type": "RELAY_STATE_UPDATE" | "SENSOR_DATA_UPDATE", "data": { ... }, "timestamp": "<ISO-8601 UTC>" }
+  ```
 
-All channels and the state key carry the same envelope:
+  Producers and consumers tolerate unknown `type` values.
 
-```json
-{
-  "type": "RELAY_STATE_UPDATE" | "SENSOR_DATA_UPDATE",
-  "data": { ... },
-  "timestamp": "<ISO-8601 UTC>"
-}
-```
+- **ODIN → Coruscant** (relay control), channel `relays:control` (`REDIS_RELAYS_CHANNEL`):
+
+  ```json
+  { "type": "RELAY_STATE_UPDATE", "data": { "relay_id": "<string>", "state": "<string>" } }
+  ```
+
+  - `state` is `"ON"` or `"OFF"`; consumers must ignore unknown relays.
+
+- **Coruscant → ODIN** (telemetry), channel `sensors:telemetry` (`REDIS_SENSORS_CHANNEL`). Envelope:
+
+  ```json
+  { "type": "SENSOR_DATA_UPDATE", "data": { ... }, "timestamp": "<ISO-8601 UTC>" }
+  ```
 
 `data` shape depends on `type`:
 
 - `RELAY_STATE_UPDATE`: `{ "relay_id": "<string>", "state": "<string>" }`
-- `SENSOR_DATA_UPDATE`: `{ "sensor_id": "<string>", "value": <float>, "unit": "<string>" }`
+- `SENSOR_DATA_UPDATE`: `{ "sensor_id": "<string>", "value": "<string>", "unit": "<string>" }`
+  — producers may add fields (coruscant also sends `temp` and `humidity`) additively.
 
 ### 3. Shared enums (must match on both sides)
 
 Defined in two places and **must stay in lock-step**:
 
-| Concept       | ODIN (`odin/apps/core/redis_bus.py`)    | Coruscant (`coruscant/services/redis_bus.py`) |
-| ------------- | --------------------------------------- | --------------------------------------------- |
-| `MessageType` | `RELAY_STATE_UPDATE`, `SENSOR_DATA_UPDATE` | identical values                           |
-| `PartitionKey`| `sensors`, `relays`                     | identical values                              |
+- **`MessageType`** — `RELAY_STATE_UPDATE`, `SENSOR_DATA_UPDATE`.
+- **`PartitionKey`** — `sensors`, `relays`.
 
-`MessageType` and `PartitionKey` are not Kafka types. `MessageType` maps to the
-envelope's `type` field on the wire; `PartitionKey` is not a wire field — it
-selects the routing destination:
+Locations:
 
-- `relays` — channel `relays:control` and state keys `relays:state:<relay_id>`
-- `sensors` — channel `sensors:telemetry`
+- ODIN: `odin/apps/core/redis_bus.py`
+- Coruscant: `coruscant/services/redis_bus.py`
 
-Both sides must use the routing above (via the `REDIS_*` env vars), so the
-envelopes they produce and consume stay wire-compatible.
+Both enums are plain JSON-envelope discriminants now, not broker-level constructs.
 
 Rule: never rename a value in one repo without renaming it in the other in the
 same release. Add new values additively; producers and consumers tolerate
@@ -126,16 +121,16 @@ unknown values.
 
 ### 4. Environment / configuration
 
-| Variable                      | Used by          | Default (dev)                             |
-| ----------------------------- | ---------------- | ----------------------------------------- |
-| `API_URL`                     | coruscant        | `http://192.168.1.100/api/v1`             |
-| `SYNC_API_URL`                | coruscant        | `${API_URL}/sensors/logs/`                |
-| `REDIS_URL`                   | odin, coruscant  | `redis://localhost:6379/0`                |
-| `REDIS_RELAYS_CHANNEL`        | odin, coruscant  | `relays:control`                          |
-| `REDIS_SENSORS_CHANNEL`       | odin, coruscant  | `sensors:telemetry`                       |
-| `REDIS_RELAY_STATE_KEY_PREFIX`| odin, coruscant  | `relays:state:`                           |
-| `LOGS_API_URL`                | coruscant        | `${API_URL}/core/logs/`                   |
-| `SERVER_ADDRESS`              | centax (firmware, hardcoded) | `http://192.168.1.100/api/v1/sensors/logs/` |
+- **`API_URL`** — coruscant — default `http://192.168.1.100/api/v1`.
+- **`SYNC_API_URL`** — coruscant — default `${API_URL}/sensors/logs/`.
+- **`REDIS_URL`** — odin, coruscant — default `redis://localhost:6379/0`.
+- **`REDIS_RELAYS_CHANNEL`** — odin, coruscant — default `relays:control`.
+- **`REDIS_SENSORS_CHANNEL`** — odin, coruscant — default `sensors:telemetry`.
+- **`REDIS_RELAY_STATE_KEY_PREFIX`** — odin, coruscant — default `relays:state:`
+  (last known relay state, JSON, 24h TTL).
+- **`LOGS_API_URL`** — coruscant — default `${API_URL}/core/logs/`.
+- **`SERVER_ADDRESS`** — centax (firmware, hardcoded) — default
+  `http://192.168.1.100/api/v1/sensors/logs/`.
 
 Keep defaults in sync. `centax` is a firmware build, so changing
 `SERVER_ADDRESS` requires a recompile and re-flash.
@@ -161,7 +156,24 @@ Keep defaults in sync. `centax` is a firmware build, so changing
 - No secrets in commits; configuration via env vars.
 - Loggers at module level (`logger = logging.getLogger(__name__)`), no
   `print` for diagnostics.
-- Tests with pytest; mock external services (redis-py, GPIO, HTTP).
+- Tests with pytest; mock external services (Redis, GPIO, HTTP).
+
+## Documentation Style (applies to every `.md` file in this repo and every submodule)
+
+- **No GitHub-flavored Markdown tables.** Render tabular data as bulleted
+  lists with bold lead-ins (e.g. `**Foo** — description, default, notes`).
+  Tables make diffs noisy, don't reflow in narrow viewers, and are easy to
+  drift out of sync across columns.
+- Plain fenced code blocks for JSON, command output, file paths, and config
+  snippets.
+- One H1 (`#`) per file; H2 (`##`) for top-level sections; H3 (`###`) only
+  for sub-sections.
+- **Hard-wrap paragraph text at 120 chars.** Every line of prose — bullets,
+  paragraphs, list items — must wrap so no line exceeds 120 characters. This
+  matches the Python `line-length = 120` setting in every submodule and keeps
+  diffs, code review, and `git log -p` readable. Code blocks and inline code
+  are exempt.
+- Do not paste screenshots for things a code block can express.
 
 ## Conventions Unique to a Submodule
 
@@ -169,8 +181,8 @@ Keep defaults in sync. `centax` is a firmware build, so changing
   `templates/`), URL-versioned API at `/api/v1/...`, RQ for background jobs,
   APScheduler for periodic jobs, pytest-django + Factory Boy for tests.
   See `odin/AGENTS.md`.
-- **coruscant** — hardware-facing Python: GPIO, DS18B20, local
-  SQLite/PostgreSQL. Crontab-driven, deployed via `scp`. See
+- **coruscant** — hardware-facing Python: GPIO, DS18B20, Redis pub/sub
+  client, local SQLite/PostgreSQL. Crontab-driven, deployed via `scp`. See
   `coruscant/AGENTS.md`.
 - **centax** — Arduino sketch, no Python. Build with `arduino-cli` via the
   `Makefile`. No tests; verify by flashing a real ESP-01S. See `centax/README.md`

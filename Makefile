@@ -1,0 +1,2 @@
+sync:
+	git submodule update
