@@ -59,6 +59,7 @@ every affected submodule plus an umbrella PR that bumps the gitlinks.
 
   - `sensor_id` must already exist in `odin` (foreign key to `Sensor`).
   - `temp` is °C, `humidity` is `%RH`. Omit a field the sensor cannot provide.
+
 - **Response:** 200 OK on success; 400 on validation; 404 on unknown
   `sensor_id`.
 - **Versioning:** additive fields are non-breaking. Removing/renaming a field
@@ -77,6 +78,7 @@ every affected submodule plus an umbrella PR that bumps the gitlinks.
   ```
 
   Producers and consumers tolerate unknown `type` values.
+
 - **ODIN → Coruscant** (relay control), channel `relays:control` (`REDIS_RELAYS_CHANNEL`):
 
   ```json
@@ -84,17 +86,18 @@ every affected submodule plus an umbrella PR that bumps the gitlinks.
   ```
 
   - `state` is `"ON"` or `"OFF"`; consumers must ignore unknown relays.
+
 - **Coruscant → ODIN** (telemetry), channel `sensors:telemetry` (`REDIS_SENSORS_CHANNEL`). Envelope:
 
   ```json
   { "type": "SENSOR_DATA_UPDATE", "data": { ... }, "timestamp": "<ISO-8601 UTC>" }
   ```
 
-  `data` shape depends on `type`:
+`data` shape depends on `type`:
 
-  - `RELAY_STATE_UPDATE`: `{ "relay_id": "<string>", "state": "<string>" }`
-  - `SENSOR_DATA_UPDATE`: `{ "sensor_id": "<string>", "value": "<string>", "unit": "<string>" }`
-    — producers may add fields (coruscant also sends `temp` and `humidity`) additively.
+- `RELAY_STATE_UPDATE`: `{ "relay_id": "<string>", "state": "<string>" }`
+- `SENSOR_DATA_UPDATE`: `{ "sensor_id": "<string>", "value": "<string>", "unit": "<string>" }`
+  — producers may add fields (coruscant also sends `temp` and `humidity`) additively.
 
 ### 3. Shared enums
 

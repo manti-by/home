@@ -62,6 +62,7 @@ the umbrella repo's gitlink for each.
 
   - `sensor_id` must already exist in `odin` (foreign key to `Sensor`).
   - `temp` is °C, `humidity` is `%RH`. Omit a field the sensor cannot provide.
+
 - **Response:** 200 OK on success; 400 on validation; 404 on unknown `sensor_id`.
 - **Versioning rule:** additive fields are non-breaking. Removing/renaming a
   field or changing its type is a breaking change → bump `/api/v2/` and keep
@@ -79,6 +80,7 @@ the umbrella repo's gitlink for each.
   ```
 
   Producers and consumers tolerate unknown `type` values.
+
 - **ODIN → Coruscant** (relay control), channel `relays:control` (`REDIS_RELAYS_CHANNEL`):
 
   ```json
@@ -86,17 +88,18 @@ the umbrella repo's gitlink for each.
   ```
 
   - `state` is `"ON"` or `"OFF"`; consumers must ignore unknown relays.
+
 - **Coruscant → ODIN** (telemetry), channel `sensors:telemetry` (`REDIS_SENSORS_CHANNEL`). Envelope:
 
   ```json
   { "type": "SENSOR_DATA_UPDATE", "data": { ... }, "timestamp": "<ISO-8601 UTC>" }
   ```
 
-  `data` shape depends on `type`:
+`data` shape depends on `type`:
 
-  - `RELAY_STATE_UPDATE`: `{ "relay_id": "<string>", "state": "<string>" }`
-  - `SENSOR_DATA_UPDATE`: `{ "sensor_id": "<string>", "value": "<string>", "unit": "<string>" }`
-    — producers may add fields (coruscant also sends `temp` and `humidity`) additively.
+- `RELAY_STATE_UPDATE`: `{ "relay_id": "<string>", "state": "<string>" }`
+- `SENSOR_DATA_UPDATE`: `{ "sensor_id": "<string>", "value": "<string>", "unit": "<string>" }`
+  — producers may add fields (coruscant also sends `temp` and `humidity`) additively.
 
 ### 3. Shared enums (must match on both sides)
 
