@@ -11,18 +11,17 @@ under this repository.
 |  centax   | --------------------> |                 |
 | (ESP-01S) |   POST /sensors/logs  |                 |
 +-----------+                       |                 |
-                                    |     odin        |        Kafka
+                                    |     odin        |      Redis bus
 +-----------+        HTTP           |  (Django 5.2)   | <-------------> coruscant
 | coruscant | --------------------> |  PostgreSQL     |   telemetry &
 | (RPi sat) |   POST /sensors/logs  |  Redis + RQ     |   relay control
 +-----------+                       +-----------------+
 ```
 
-| Service     | Path        | Role                                                                 |
-| ----------- | ----------- | -------------------------------------------------------------------- |
-| `odin`      | `odin/`     | Central Django 5.2 / DRF server, PostgreSQL, Redis, gunicorn + worker |
-| `coruscant` | `coruscant/`| Raspberry Pi satellite: DS18B20 sensors, pumps/valves/servos, Kafka   |
-| `centax`    | `centax/`   | ESP-01S firmware: DHT22 temp/humidity, HTTP POST to ODIN             |
+- **`odin/`** — Central Django 5.2 / DRF server, PostgreSQL, Redis, gunicorn + worker.
+- **`coruscant/`** — Raspberry Pi satellite: DS18B20 sensors, pumps/valves/servos,
+  Redis pub/sub client.
+- **`centax/`** — ESP-01S firmware: DHT22 temp/humidity, HTTP POST to ODIN.
 
 Each submodule keeps its own `AGENTS.md` with service-specific rules. The
 umbrella `AGENTS.md` is the source of truth for anything that crosses
@@ -66,34 +65,44 @@ every affected submodule plus an umbrella PR that bumps the gitlinks.
   or changing its type is a breaking change → bump `/api/v2/` and keep v1
   alive until every producer has moved.
 
-### 2. Kafka topics
+### 2. Redis pub/sub channels
 
-- Bootstrap servers come from env, default `192.168.1.100:9092`.
-- **ODIN → Coruscant** (relay control), topic `KAFKA_CORUSCANT_TOPIC`:
+- Connection comes from `REDIS_URL`, default `redis://localhost:6379/0`. Pub/sub delivery is
+  fire-and-forget with no replay; the last known relay state is persisted separately under
+  `relays:state:<relay_id>` so consumers can read it without a live subscription.
+- Every message on both channels is a JSON envelope:
 
   ```json
-  { "relay_id": "<string>", "target_state": "<string>" }
+  { "type": "RELAY_STATE_UPDATE" | "SENSOR_DATA_UPDATE", "data": { ... }, "timestamp": "<ISO-8601 UTC>" }
   ```
 
-- **Coruscant → ODIN** (telemetry), topic `KAFKA_ODIN_TOPIC` (default `odin`).
-  Envelope:
+  Producers and consumers tolerate unknown `type` values.
+- **ODIN → Coruscant** (relay control), channel `relays:control` (`REDIS_RELAYS_CHANNEL`):
 
   ```json
-  { "type": "RELAY_STATE_UPDATE" | "SENSOR_DATA_UPDATE", "data": { ... } }
+  { "type": "RELAY_STATE_UPDATE", "data": { "relay_id": "<string>", "state": "<string>" } }
+  ```
+
+  - `state` is `"ON"` or `"OFF"`; consumers must ignore unknown relays.
+- **Coruscant → ODIN** (telemetry), channel `sensors:telemetry` (`REDIS_SENSORS_CHANNEL`). Envelope:
+
+  ```json
+  { "type": "SENSOR_DATA_UPDATE", "data": { ... }, "timestamp": "<ISO-8601 UTC>" }
   ```
 
   `data` shape depends on `type`:
 
   - `RELAY_STATE_UPDATE`: `{ "relay_id": "<string>", "state": "<string>" }`
-  - `SENSOR_DATA_UPDATE`: `{ "sensor_id": "<string>", "value": <float>, "unit": "<string>" }`
+  - `SENSOR_DATA_UPDATE`: `{ "sensor_id": "<string>", "value": "<string>", "unit": "<string>" }`
+    — producers may add fields (coruscant also sends `temp` and `humidity`) additively.
 
 ### 3. Shared enums
 
-`MessageType` and `PartitionKey` are defined in two places and must stay in
-lock-step:
+`MessageType` and `PartitionKey` are plain JSON-envelope discriminants (not broker-level
+constructs) defined in two places and must stay in lock-step:
 
-- ODIN: `odin/apps/core/kafka.py`
-- Coruscant: `coruscant/services/kafka.py`
+- ODIN: `odin/apps/core/redis_bus.py`
+- Coruscant: `coruscant/services/redis_bus.py`
 
 Add new values additively; producers and consumers tolerate unknown values.
 Renaming a value in one repo without renaming it in the other in the same
@@ -101,16 +110,16 @@ release is forbidden.
 
 ### 4. Environment / configuration
 
-| Variable               | Used by        | Default (dev)                                    |
-| ---------------------- | -------------- | ------------------------------------------------ |
-| `API_URL`              | coruscant      | `http://192.168.1.100/api/v1`                    |
-| `SYNC_API_URL`         | coruscant      | `${API_URL}/sensors/logs/`                       |
-| `KAFKA_SERVERS`        | odin, coruscant| `192.168.1.100:9092`                             |
-| `KAFKA_TOPIC`          | coruscant      | `odin`                                           |
-| `KAFKA_ODIN_TOPIC`     | odin           | `odin`                                           |
-| `KAFKA_CORUSCANT_TOPIC`| odin           | `coruscant`                                      |
-| `LOGS_API_URL`         | coruscant      | `${API_URL}/core/logs/`                          |
-| `SERVER_ADDRESS`       | centax (firmware, hardcoded) | `http://192.168.1.100/api/v1/sensors/logs/` |
+- **`API_URL`** — coruscant — default `http://192.168.1.100/api/v1`.
+- **`SYNC_API_URL`** — coruscant — default `${API_URL}/sensors/logs/`.
+- **`REDIS_URL`** — odin, coruscant — default `redis://localhost:6379/0`.
+- **`REDIS_RELAYS_CHANNEL`** — odin, coruscant — default `relays:control`.
+- **`REDIS_SENSORS_CHANNEL`** — odin, coruscant — default `sensors:telemetry`.
+- **`REDIS_RELAY_STATE_KEY_PREFIX`** — odin, coruscant — default `relays:state:`
+  (last known relay state, JSON, 24h TTL).
+- **`LOGS_API_URL`** — coruscant — default `${API_URL}/core/logs/`.
+- **`SERVER_ADDRESS`** — centax (firmware, hardcoded) — default
+  `http://192.168.1.100/api/v1/sensors/logs/`.
 
 Keep defaults in sync. `centax` is a firmware build, so changing
 `SERVER_ADDRESS` requires a recompile and re-flash.
@@ -152,7 +161,7 @@ Applies in every submodule:
 - No secrets in commits; configuration via env vars.
 - Loggers at module level (`logger = logging.getLogger(__name__)`), no
   `print` for diagnostics.
-- Tests with pytest; mock external services (Kafka, GPIO, HTTP).
+- Tests with pytest; mock external services (Redis, GPIO, HTTP).
 
 Per-submodule conventions (Django layout for `odin`, hardware-facing Python
 for `coruscant`, Arduino sketch built with `arduino-cli` for `centax`) are
