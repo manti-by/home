@@ -2,6 +2,8 @@
 type: implementation
 session_id: ses_fcd45a4befferUSqM66UMeumQL
 date: 2026-08-24
+related:
+  - 2026-08-24-mnt-127-crosscheck.md
 ---
 
 # Kafka → Redis cutover: submodule gitlink bump (MNT-154)

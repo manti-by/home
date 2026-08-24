@@ -6,8 +6,9 @@ boundaries.
 
 ## Layout
 
-- **`odin/`** — `git@github.com:manti-by/odin.git` — Central Django 5.2 / DRF server,
-  PostgreSQL, Redis, gunicorn + worker.
+- **`odin/`** — `git@github.com:manti-by/odin.git` — Central Django 6 / DRF server,
+  PostgreSQL, Redis, gunicorn + worker; ships a React/Vite SPA frontend
+  (`frontend/`) and eBus boiler control (`apps/boiler`, backed by `ebusd`).
 - **`coruscant/`** — `git@github.com:manti-by/coruscant.git` — Raspberry Pi satellite:
   DS18B20 sensors, pumps/valves/servos, Redis pub/sub client.
 - **`centax/`** — `git@github.com:manti-by/centax.git` — ESP-01S firmware: DHT22
@@ -30,7 +31,7 @@ edit files inside a submodule from the parent checkout; commit in the submodule
 first, then bump the gitlink from the parent (`git add <submodule>`).
 
 Pin a known-good combination of submodule commits in a dedicated branch of this
-umbrella repo (e.g. `integrations/2026-Q2`) when shipping a release that
+umbrella repo (e.g. `integrations/2026-Q3`) when shipping a release that
 coordinates versions across services.
 
 ## Git Workflow (umbrella repo)
@@ -57,13 +58,17 @@ the umbrella repo's gitlink for each.
 - **Request body (JSON):**
 
   ```json
-  { "sensor_id": "<string>", "temp": <float>, "humidity": <float> }
+  { "sensor_id": "<string>", "temp": <float>, "humidity": <float>, "created_at": "<ISO-8601>" }
   ```
 
-  - `sensor_id` must already exist in `odin` (foreign key to `Sensor`).
+  - `sensor_id` is a free-form string — `odin` does not require it to
+    pre-exist; logs for unknown IDs are stored as-is (`SensorLog.sensor_id`
+    is a plain column, not a foreign key).
   - `temp` is °C, `humidity` is `%RH`. Omit a field the sensor cannot provide.
+  - `created_at` is optional; when omitted, `odin` stamps server time.
 
-- **Response:** 200 OK on success; 400 on validation; 404 on unknown `sensor_id`.
+- **Response:** 201 Created on success; 400 on validation errors. An unknown
+  `sensor_id` is not rejected.
 - **Versioning rule:** additive fields are non-breaking. Removing/renaming a
   field or changing its type is a breaking change → bump `/api/v2/` and keep
   v1 alive until every producer has moved.
@@ -128,7 +133,9 @@ unknown values.
 - **`REDIS_SENSORS_CHANNEL`** — odin, coruscant — default `sensors:telemetry`.
 - **`REDIS_RELAY_STATE_KEY_PREFIX`** — odin, coruscant — default `relays:state:`
   (last known relay state, JSON, 24h TTL).
-- **`LOGS_API_URL`** — coruscant — default `${API_URL}/core/logs/`.
+- **`LOGS_API_URL`** — coruscant — default
+  `http://192.168.1.100/api/v1/core/logs/` (literal; unlike `SYNC_API_URL`
+  it does not follow `API_URL` overrides).
 - **`SERVER_ADDRESS`** — centax (firmware, hardcoded) — default
   `http://192.168.1.100/api/v1/sensors/logs/`.
 
@@ -182,8 +189,8 @@ Keep defaults in sync. `centax` is a firmware build, so changing
   APScheduler for periodic jobs, pytest-django + Factory Boy for tests.
   See `odin/AGENTS.md`.
 - **coruscant** — hardware-facing Python: GPIO, DS18B20, Redis pub/sub
-  client, local SQLite/PostgreSQL. Crontab-driven, deployed via `scp`. See
-  `coruscant/AGENTS.md`.
+  client, local SQLite/PostgreSQL. Crontab-driven (`utils/crontab.conf`),
+  deployed by pulling on the Pi (`make deploy`). See `coruscant/AGENTS.md`.
 - **centax** — Arduino sketch, no Python. Build with `arduino-cli` via the
   `Makefile`. No tests; verify by flashing a real ESP-01S. See `centax/README.md`
   and `centax/Makefile`.
