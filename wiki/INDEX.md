@@ -4,6 +4,12 @@
 
 _Newest first._
 
+- [Relay mode round-trip through Redis](pages/2026-10-13-relay-mode-via-redis-round-trip.md) —
+  `Relay.mode` was a write-only cache only an API write refreshed, so servo mode
+  changes from sensor, weather or pump-off never reached the column; ODIN now
+  publishes `mode` on every `RELAY_STATE_UPDATE` in both directions and coruscant
+  echoes it back, fixing the admin publishing a fresh `target_state` next to a
+  stale `obj.mode` (401 + 50 passed) (2026-10-13).
 - [MNT-127 crosscheck — tickets, PRs, submodules](pages/2026-08-24-mnt-127-crosscheck.md) —
   Crosscheck of every ticket, PR, and submodule pointer linked to MNT-127 plus the
   MNT-178/179/180 drift fix; flags the uncommitted post-drift gitlink bump and the

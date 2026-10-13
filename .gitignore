@@ -4,6 +4,7 @@
 .ropeproject/
 .vscode/
 .zed/
+.opencode/
 
 .DS_Store
 
@@ -23,4 +24,3 @@ venv/
 **/node_modules/
 **/dist/
 **/.vite/
-

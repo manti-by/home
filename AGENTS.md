@@ -89,10 +89,28 @@ the umbrella repo's gitlink for each.
 - **ODIN → Coruscant** (relay control), channel `relays:control` (`REDIS_RELAYS_CHANNEL`):
 
   ```json
-  { "type": "RELAY_STATE_UPDATE", "data": { "relay_id": "<string>", "state": "<string>" } }
+  {
+    "type": "RELAY_STATE_UPDATE",
+    "data": { "relay_id": "<string>", "state": "<string>", "mode": "<string|null>", "user_id": "<int|null>" }
+  }
   ```
 
   - `state` is `"ON"` or `"OFF"`; consumers must ignore unknown relays.
+  - `mode` is required and is the freshly computed mode (`Relay.get_target_state()[1]`)
+    that matches the published `state` — not the stored column, which may be stale.
+  - `user_id` is the acting user's pk, or `null` for system-driven updates.
+
+- **Coruscant → ODIN** (relay status), channel `relays:control`, same `RELAY_STATE_UPDATE` type:
+
+  ```json
+  { "type": "RELAY_STATE_UPDATE", "data": { "relay_id": "<string>", "state": "<string>", "mode": "<string|null>" } }
+  ```
+
+  - `mode` is the value ODIN returned in the `mode` field of
+    `GET /api/v1/relays/<relay_id>/`; it is `null` for relays driven locally
+    (valves) or when the relay was switched by an older ODIN.
+  - ODIN persists `mode` only when it is a valid `RelayMode`; a missing or
+    `null` mode leaves the stored column untouched.
 
 - **Coruscant → ODIN** (telemetry), channel `sensors:telemetry` (`REDIS_SENSORS_CHANNEL`). Envelope:
 
@@ -102,7 +120,10 @@ the umbrella repo's gitlink for each.
 
 `data` shape depends on `type`:
 
-- `RELAY_STATE_UPDATE`: `{ "relay_id": "<string>", "state": "<string>" }`
+- `RELAY_STATE_UPDATE`: `{ "relay_id": "<string>", "state": "<string>", "mode": "<string|null>" }`
+  — `mode` is present in both directions but consumers must treat a missing or
+  `null` mode as "unchanged", since coruscant emits `null` for locally driven
+  relays (valves). `user_id` is ODIN-only.
 - `SENSOR_DATA_UPDATE`: `{ "sensor_id": "<string>", "value": "<string>", "unit": "<string>" }`
   — producers may add fields (coruscant also sends `temp` and `humidity`) additively.
 
